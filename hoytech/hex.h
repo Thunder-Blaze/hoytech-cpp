@@ -4,6 +4,7 @@
 
 #include <string>
 #include <string_view>
+#include <cstdint>
 
 #include "hoytech/error.h"
 

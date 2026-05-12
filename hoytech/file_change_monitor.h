@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -37,7 +38,7 @@ class file_change_monitor {
     std::string watched_path;
     uint64_t debounce_us = 50 * 1000;
     int shutdown_pipe[2] = {-1, -1};
-    bool shutdown = false;
+    std::atomic<bool> shutdown{false};
 
 #ifdef __linux__
     int inotify_fd = -1;
@@ -45,7 +46,7 @@ class file_change_monitor {
 
     void add_watch() {
         inotify_wd = ::inotify_add_watch(inotify_fd, watched_path.c_str(),
-            IN_CLOSE_WRITE | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+            IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
         if (inotify_wd < 0) throw hoytech::error("unable to add watch to inotify descriptor: ", ::strerror(errno));
     }
 
