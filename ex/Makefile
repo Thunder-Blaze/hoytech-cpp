@@ -6,9 +6,9 @@ CXXFLAGS = $(STD) $(OPT) $(W) $(INC) -fPIC $(XCXXFLAGS)
 LDFLAGS  = -lpthread $(XLDFLAGS)
 
 # Binaries built by default
-TEST_BINS = hex_test stream_test file_change_monitor_test
+TEST_BINS = hex_test stream_test zerocopy_test file_change_monitor_test
 
-all: $(TEST_BINS) timer_test zerocopy_test
+all: $(TEST_BINS) timer_test
 
 # ---------------------------------------------------------------------------
 # Individual targets
@@ -43,6 +43,8 @@ stream_test: stream_test.cpp ../hoytech/stream.h
 test: $(TEST_BINS)
 	@echo "=== Running hex_test ==="
 	./hex_test
+	@echo "=== Running zerocopy_test ==="
+	./zerocopy_test
 	@echo "=== Running stream_test ==="
 	./stream_test
 	@echo "=== Running file_change_monitor_test ==="

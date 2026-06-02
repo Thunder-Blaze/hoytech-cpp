@@ -38,13 +38,12 @@
 #include <sys/types.h>
 #include <thread>
 #include <unistd.h>
+#include <utime.h>
 #include <vector>
 
 #include "hoytech/file_change_monitor.h"
 
-// =============================================================================
 // Minimal test framework
-// =============================================================================
 
 static int g_tests_run    = 0;
 static int g_tests_passed = 0;
@@ -62,9 +61,7 @@ static int g_tests_failed = 0;
 
 #define ASSERT_EQ(a, b) ASSERT((a) == (b))
 
-// =============================================================================
 // Helpers
-// =============================================================================
 
 /** Sleep for ms milliseconds. */
 static void sleep_ms(int ms) {
@@ -128,32 +125,37 @@ struct FileGuard {
     ~FileGuard() { remove_file(path.c_str()); }
 };
 
-// =============================================================================
-// Test registry
-// =============================================================================
+// Test registry (with XFAIL support)
 
 struct TestCase {
     const char *name;
     std::function<void()> fn;
+    bool xfail;  // true = expected to fail (forward-looking)
 };
 
 static std::vector<TestCase> g_tests;
+static int g_xfail_count = 0;   // expected failures that did fail
+static int g_xpass_count = 0;   // expected failures that passed (bonus!)
 
-// Helper so we can use static initializers
 struct TestRegistrar {
-    TestRegistrar(const char *name, std::function<void()> fn) {
-        g_tests.push_back({name, fn});
+    TestRegistrar(const char *name, std::function<void()> fn, bool xfail = false) {
+        g_tests.push_back({name, fn, xfail});
     }
 };
 
 #define REGISTER_TEST(name) \
     static void test_##name(); \
-    static TestRegistrar _reg_##name(#name, test_##name); \
+    static TestRegistrar _reg_##name(#name, test_##name, false); \
     static void test_##name()
 
-// =============================================================================
+// XFAIL tests: expected to fail today, tracked for future implementation.
+// Their failure does NOT affect the exit code.
+#define REGISTER_XFAIL_TEST(name) \
+    static void test_##name(); \
+    static TestRegistrar _reg_##name(#name, test_##name, true); \
+    static void test_##name()
+
 // Timing constants (generous for slow / heavily loaded CI runners)
-// =============================================================================
 
 // Debounce used in all tests (ms)
 static const int DEBOUNCE_MS = 100;
@@ -173,16 +175,12 @@ static const int INODE_CHECK_MS = 100;
 // Inode-detection budget = interval + debounce + slack
 static const int INODE_TIMEOUT_MS = INODE_CHECK_MS + CALLBACK_TIMEOUT_MS;
 
-// =============================================================================
 // Shared tmp path helper
-// =============================================================================
 static std::string tmp_path(const char *test_name) {
     return std::string("/tmp/hoytech_fcm_test_") + test_name + ".txt";
 }
 
-// =============================================================================
 // 1. Basic write detection
-// =============================================================================
 REGISTER_TEST(basic_write) {
     std::string path = tmp_path("basic_write");
     FileGuard g(path.c_str());
@@ -200,7 +198,6 @@ REGISTER_TEST(basic_write) {
     ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 2. Create / initial-write detection
 //
 //    inotify (Linux) cannot watch a path that does not yet exist; we therefore
@@ -209,7 +206,6 @@ REGISTER_TEST(basic_write) {
 //
 //    On kqueue and the polling backend the same write triggers detection even
 //    without the placeholder trick, so the test is portable across all three.
-// =============================================================================
 REGISTER_TEST(create_detection) {
     std::string path = tmp_path("create_detection");
     // Create an empty placeholder so every backend can attach
@@ -229,9 +225,7 @@ REGISTER_TEST(create_detection) {
     ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 3. Truncate / O_TRUNC detection
-// =============================================================================
 REGISTER_TEST(truncate_detection) {
     std::string path = tmp_path("truncate");
     FileGuard g(path.c_str());
@@ -253,9 +247,7 @@ REGISTER_TEST(truncate_detection) {
     ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 4. Append detection
-// =============================================================================
 REGISTER_TEST(append_detection) {
     std::string path = tmp_path("append");
     FileGuard g(path.c_str());
@@ -273,11 +265,9 @@ REGISTER_TEST(append_detection) {
     ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 5. Attribute change (chmod) detection
 //    On polling backend chmod alone may not change mtime, so we fall back
 //    to an additional write to ensure at least one callback fires.
-// =============================================================================
 REGISTER_TEST(chmod_detection) {
     std::string path = tmp_path("chmod");
     FileGuard g(path.c_str());
@@ -308,9 +298,7 @@ REGISTER_TEST(chmod_detection) {
     ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 6. Delete -> rewatch -> recreate detection
-// =============================================================================
 REGISTER_TEST(delete_and_recreate) {
     std::string path = tmp_path("delete_recreate");
     FileGuard g(path.c_str());
@@ -336,9 +324,7 @@ REGISTER_TEST(delete_and_recreate) {
     ASSERT(wait_for_count(count, 1, INODE_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 7. Rename-away -> rewatch -> recreate detection
-// =============================================================================
 REGISTER_TEST(rename_and_recreate) {
     std::string path  = tmp_path("rename_recreate");
     std::string moved = path + ".moved";
@@ -366,9 +352,7 @@ REGISTER_TEST(rename_and_recreate) {
     ASSERT(wait_for_count(count, 1, INODE_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 8. Debounce: rapid writes coalesced into a small number of callbacks
-// =============================================================================
 REGISTER_TEST(debounce_coalescing) {
     std::string path = tmp_path("debounce");
     FileGuard g(path.c_str());
@@ -397,9 +381,7 @@ REGISTER_TEST(debounce_coalescing) {
     ASSERT(final_count <= 2);
 }
 
-// =============================================================================
 // 9. No false positives on idle file
-// =============================================================================
 REGISTER_TEST(no_false_positives) {
     std::string path = tmp_path("no_false_pos");
     FileGuard g(path.c_str());
@@ -417,9 +399,7 @@ REGISTER_TEST(no_false_positives) {
     ASSERT_EQ(count.load(), 0);
 }
 
-// =============================================================================
 // 10. Inode-change detection via atomic rename replacement
-// =============================================================================
 REGISTER_TEST(inode_change_detection) {
     std::string path = tmp_path("inode_change");
     FileGuard g(path.c_str());
@@ -440,9 +420,7 @@ REGISTER_TEST(inode_change_detection) {
     ASSERT(wait_for_count(count, 1, INODE_TIMEOUT_MS));
 }
 
-// =============================================================================
 // 11. Clean shutdown -- no callback after destructor returns
-// =============================================================================
 REGISTER_TEST(clean_shutdown) {
     std::string path = tmp_path("shutdown");
     FileGuard g(path.c_str());
@@ -468,9 +446,7 @@ REGISTER_TEST(clean_shutdown) {
     ASSERT_EQ(count.load(), count_at_shutdown);
 }
 
-// =============================================================================
 // 12. Multiple sequential callbacks
-// =============================================================================
 REGISTER_TEST(multiple_sequential_callbacks) {
     std::string path = tmp_path("multi_cb");
     FileGuard g(path.c_str());
@@ -494,38 +470,280 @@ REGISTER_TEST(multiple_sequential_callbacks) {
     ASSERT(count.load() >= 3);
 }
 
-// =============================================================================
-// main
-// =============================================================================
+// 13. Touch (utime) detection -- changing mtime without content change
+REGISTER_TEST(touch_utime_detection) {
+    std::string path = tmp_path("touch_utime");
+    FileGuard g(path.c_str());
+
+    write_file(path.c_str(), "stable content\n");
+    sleep_ms(100); // ensure mtime is in the past
+
+    std::atomic<int> count{0};
+    hoytech::file_change_monitor mon(path);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    // Touch the file (updates mtime) without changing content
+    struct utimbuf times;
+    times.actime  = ::time(nullptr) + 100;
+    times.modtime = ::time(nullptr) + 100;
+    utime(path.c_str(), &times);
+
+    // inotify: IN_ATTRIB fires.  kqueue: NOTE_ATTRIB.  polling: mtime differs.
+    // If the backend doesn't detect pure utime, fall back to a content write.
+    sleep_ms(200);
+    if (count.load() == 0) {
+        append_file(path.c_str(), "\n");
+    }
+    ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
+}
+
+// 14. Rapid delete/recreate cycle (log rotation pattern)
+REGISTER_TEST(rapid_delete_recreate_cycle) {
+    std::string path = tmp_path("log_rotate");
+    FileGuard g(path.c_str());
+
+    write_file(path.c_str(), "v0\n");
+
+    std::atomic<int> count{0};
+    hoytech::file_change_monitor mon(path);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.setMaxRewatchAttempts(30);
+    mon.setRewatchBackoff(5'000);
+    mon.setInodeCheckInterval(INODE_CHECK_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    // Simulate 3 log-rotation cycles: delete, pause, recreate
+    for (int i = 1; i <= 3; i++) {
+        remove_file(path.c_str());
+        sleep_ms(80);
+        write_file(path.c_str(), ("rotation " + std::to_string(i) + "\n").c_str());
+        ASSERT(wait_for_count(count, i, INODE_TIMEOUT_MS));
+        sleep_ms(DEBOUNCE_MS + 50); // let debounce settle between cycles
+    }
+}
+
+// 15. Concurrent monitors on the same file
+REGISTER_TEST(concurrent_monitors) {
+    std::string path = tmp_path("concurrent");
+    FileGuard g(path.c_str());
+
+    write_file(path.c_str(), "shared\n");
+
+    std::atomic<int> count_a{0};
+    std::atomic<int> count_b{0};
+    hoytech::file_change_monitor mon_a(path);
+    hoytech::file_change_monitor mon_b(path);
+    mon_a.setDebounce(DEBOUNCE_MS);
+    mon_b.setDebounce(DEBOUNCE_MS);
+    mon_a.run([&]{ count_a.fetch_add(1, std::memory_order_release); });
+    mon_b.run([&]{ count_b.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    write_file(path.c_str(), "updated\n");
+
+    ASSERT(wait_for_count(count_a, 1, CALLBACK_TIMEOUT_MS));
+    ASSERT(wait_for_count(count_b, 1, CALLBACK_TIMEOUT_MS));
+}
+
+// 16. Large file write detection
+REGISTER_TEST(large_write_detection) {
+    std::string path = tmp_path("large_write");
+    FileGuard g(path.c_str());
+
+    write_file(path.c_str(), "small\n");
+
+    std::atomic<int> count{0};
+    hoytech::file_change_monitor mon(path);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    // Write 1 MB of data
+    std::string big(1024 * 1024, 'X');
+    big.back() = '\n';
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT(fd >= 0);
+    ssize_t rv = ::write(fd, big.data(), big.size());
+    close(fd);
+    ASSERT(rv == static_cast<ssize_t>(big.size()));
+
+    ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
+}
+
+// #############################################################################
+// XFAIL (expected-failure) tests
+//
+// These test behaviours that SHOULD work but the current implementation
+// does not yet fully support.  Their failures are tracked but do not
+// break CI.  When a feature is implemented, the test will start passing
+// and be reported as XPASS.
+// #############################################################################
+
+// X1. Symlink target change detection
+//     Watch a symlink; atomically replace its *target*.  The monitor should
+//     detect the change because the inode behind the symlink path changed.
+//     Current limitation: inotify watches the target inode, so when the target
+//     is replaced the old inode fires IN_DELETE_SELF, but rewatch may fail
+//     if the symlink now points to a new file.
+REGISTER_XFAIL_TEST(symlink_target_change) {
+    std::string target = tmp_path("symlink_target");
+    std::string link   = tmp_path("symlink_link");
+    remove_file(link.c_str());
+    remove_file(target.c_str());
+    FileGuard g1(target.c_str());
+    FileGuard g2(link.c_str());
+
+    write_file(target.c_str(), "original target\n");
+    ASSERT(symlink(target.c_str(), link.c_str()) == 0);
+
+    std::atomic<int> count{0};
+    hoytech::file_change_monitor mon(link);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.setInodeCheckInterval(INODE_CHECK_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    // Replace the target file atomically (new inode behind the symlink)
+    ASSERT(atomic_replace(target.c_str(), "new target content\n"));
+
+    ASSERT(wait_for_count(count, 1, INODE_TIMEOUT_MS));
+}
+
+// X2. Double run() guard
+//     Calling run() a second time on the same monitor should raise an error
+//     rather than silently clobbering the thread handle (which triggers
+//     std::terminate via ~thread() on a joinable thread — uncatchable).
+//     Current limitation: run() only guards against post-shutdown calls.
+//
+//     NOTE: We cannot actually call run() twice here because in C++17
+//     move-assigning over a joinable std::thread calls std::terminate().
+//     This test simply asserts false to track the missing guard.
+//     When a guard is added, flip this to REGISTER_TEST and test the throw.
+REGISTER_XFAIL_TEST(double_run_guard) {
+    // Placeholder: no double-run guard exists yet.
+    // A future fix should add a `running` flag and throw from run().
+    ASSERT(false);
+}
+
+// X3. Hardlink modification detection
+//     Create a hardlink to the watched file, modify through the hardlink.
+//     inotify tracks the inode so this should work, but it's not explicitly
+//     tested and may have edge cases with kqueue/polling.
+REGISTER_XFAIL_TEST(hardlink_modification) {
+    std::string path    = tmp_path("hardlink_orig");
+    std::string linkpath = tmp_path("hardlink_link");
+    remove_file(linkpath.c_str());
+    FileGuard g1(path.c_str());
+    FileGuard g2(linkpath.c_str());
+
+    write_file(path.c_str(), "original\n");
+    ASSERT(link(path.c_str(), linkpath.c_str()) == 0);
+
+    std::atomic<int> count{0};
+    hoytech::file_change_monitor mon(path);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    // Write through the hardlink — same inode, different dentry
+    ASSERT(write_file(linkpath.c_str(), "modified via hardlink\n"));
+    ASSERT(wait_for_count(count, 1, CALLBACK_TIMEOUT_MS));
+}
+
+// X4. Watch non-existent file, then create it
+//     The monitor should eventually detect that the file appeared.
+//     Current limitation: inotify/kqueue cannot attach to a non-existent path,
+//     so the constructor throws.  A future version could watch the parent dir
+//     or retry in a loop.
+REGISTER_XFAIL_TEST(watch_then_create) {
+    std::string path = tmp_path("watch_then_create");
+    remove_file(path.c_str());
+    FileGuard g(path.c_str());
+
+    std::atomic<int> count{0};
+    // This may throw on inotify/kqueue — that's the expected failure
+    hoytech::file_change_monitor mon(path);
+    mon.setDebounce(DEBOUNCE_MS);
+    mon.setInodeCheckInterval(INODE_CHECK_MS);
+    mon.run([&]{ count.fetch_add(1, std::memory_order_release); });
+
+    sleep_ms(50);
+
+    ASSERT(write_file(path.c_str(), "appeared!\n"));
+    ASSERT(wait_for_count(count, 1, INODE_TIMEOUT_MS));
+}
+
 int main() {
     fprintf(stderr, "=== hoytech::file_change_monitor test suite ===\n\n");
 
-    int prev_failed = 0;
     for (auto &tc : g_tests) {
-        fprintf(stderr, "[ RUN  ] %s\n", tc.name);
-        prev_failed = g_tests_failed;
+        const char *tag = tc.xfail ? "XFAIL" : "RUN  ";
+        fprintf(stderr, "[ %s ] %s\n", tag, tc.name);
+
+        int saved_run    = g_tests_run;
+        int saved_failed = g_tests_failed;
+
+        bool threw = false;
         try {
             tc.fn();
         } catch (const std::exception &e) {
-            ++g_tests_run;
-            ++g_tests_failed;
+            threw = true;
+            if (!tc.xfail) {
+                ++g_tests_run;
+                ++g_tests_failed;
+            }
             fprintf(stderr, "  EXCEPTION: %s\n", e.what());
         } catch (...) {
-            ++g_tests_run;
-            ++g_tests_failed;
+            threw = true;
+            if (!tc.xfail) {
+                ++g_tests_run;
+                ++g_tests_failed;
+            }
             fprintf(stderr, "  EXCEPTION: unknown\n");
         }
-        if (g_tests_failed == prev_failed) {
-            fprintf(stderr, "[ PASS ] %s\n", tc.name);
+
+        bool test_failed = threw || (g_tests_failed > saved_failed);
+
+        if (tc.xfail) {
+            // Undo assertion counter changes — XFAIL doesn't count
+            int delta_run    = g_tests_run - saved_run;
+            int delta_failed = g_tests_failed - saved_failed;
+            g_tests_run    -= delta_run;
+            g_tests_passed -= (delta_run - delta_failed);
+            g_tests_failed -= delta_failed;
+
+            if (test_failed) {
+                ++g_xfail_count;
+                fprintf(stderr, "[ XFAIL] %s  (expected failure — not yet implemented)\n", tc.name);
+            } else {
+                ++g_xpass_count;
+                fprintf(stderr, "[ XPASS] %s  (unexpected pass — feature works!)\n", tc.name);
+            }
         } else {
-            fprintf(stderr, "[ FAIL ] %s\n", tc.name);
+            if (g_tests_failed == saved_failed) {
+                fprintf(stderr, "[ PASS ] %s\n", tc.name);
+            } else {
+                fprintf(stderr, "[ FAIL ] %s\n", tc.name);
+            }
         }
     }
 
     fprintf(stderr, "\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
-    if (g_tests_failed > 0) {
+    if (g_tests_failed > 0)
         fprintf(stderr, " (%d FAILED)", g_tests_failed);
-    }
+    if (g_xfail_count > 0)
+        fprintf(stderr, " [%d xfail]", g_xfail_count);
+    if (g_xpass_count > 0)
+        fprintf(stderr, " [%d XPASS!]", g_xpass_count);
     fprintf(stderr, " ===\n");
 
     return (g_tests_failed == 0) ? 0 : 1;
