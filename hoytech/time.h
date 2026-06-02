@@ -1,6 +1,7 @@
 #pragma once
 
 #include <sys/time.h>
+#include <cstdint>
 
 namespace hoytech {
 

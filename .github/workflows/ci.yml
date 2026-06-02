@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # =========================================================================
+  # 1. Linux — inotify backend
+  #    Matrix: {GCC, Clang} × {Release, Debug, ASan}
+  # =========================================================================
+  linux:
+    name: "Linux / ${{ matrix.compiler }} / ${{ matrix.build }}"
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cxx: g++
+            build: release
+            extra_cxxflags: ""
+            extra_ldflags: ""
+          - compiler: gcc
+            cxx: g++
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+            extra_ldflags: ""
+          - compiler: gcc
+            cxx: g++
+            build: asan
+            extra_cxxflags: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+            extra_ldflags: "-fsanitize=address,undefined"
+          - compiler: clang
+            cxx: clang++
+            build: release
+            extra_cxxflags: ""
+            extra_ldflags: ""
+          - compiler: clang
+            cxx: clang++
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+            extra_ldflags: ""
+          - compiler: clang
+            cxx: clang++
+            build: asan
+            extra_cxxflags: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+            extra_ldflags: "-fsanitize=address,undefined"
+
+    env:
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential clang
+
+      - name: Build
+        working-directory: ex
+        run: |
+          make clean
+          make test \
+            XCXXFLAGS="${{ matrix.extra_cxxflags }}" \
+            XLDFLAGS="${{ matrix.extra_ldflags }}" \
+            -j$(nproc) 2>&1
+        # `make test` builds TEST_BINS then runs them sequentially
+        timeout-minutes: 5
+
+      - name: Upload binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "linux-${{ matrix.compiler }}-${{ matrix.build }}-binary"
+          path: ex/file_change_monitor_test
+          retention-days: 3
+
+  # =========================================================================
+  # 2. macOS — kqueue backend
+  #    Matrix: {Apple Clang, Homebrew LLVM} × {Release, Debug}
+  # =========================================================================
+  macos:
+    name: "macOS / ${{ matrix.compiler }} / ${{ matrix.build }}"
+    runs-on: macos-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: apple-clang
+            build: release
+            extra_cxxflags: ""
+          - compiler: apple-clang
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+          - compiler: llvm
+            build: release
+            extra_cxxflags: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew LLVM
+        if: matrix.compiler == 'llvm'
+        run: |
+          brew install llvm
+          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
+
+      - name: Set Apple Clang
+        if: matrix.compiler == 'apple-clang'
+        run: echo "CXX=clang++" >> "$GITHUB_ENV"
+
+      - name: Build and test
+        working-directory: ex
+        run: |
+          echo "=== Platform ==="
+          uname -a && sw_vers
+          echo ""
+          make clean
+          make test XCXXFLAGS="${{ matrix.extra_cxxflags }}" -j$(sysctl -n hw.ncpu)
+        timeout-minutes: 5
+
+      - name: Upload binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "macos-${{ matrix.compiler }}-${{ matrix.build }}-binary"
+          path: ex/file_change_monitor_test
+          retention-days: 3
+
+  # =========================================================================
+  # 3. FreeBSD — kqueue backend (vmactions/freebsd-vm, QEMU guest)
+  # =========================================================================
+  freebsd:
+    name: "FreeBSD 14 / clang / release"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and test inside FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          prepare: pkg install -y gmake
+          run: |
+            set -e
+            echo "=== Platform ===" && uname -a && echo ""
+            cd ex
+            gmake clean
+            gmake test CXX=clang++ -j$(sysctl -n hw.ncpu)
+        timeout-minutes: 10
+
+  # =========================================================================
+  # 4. Gate job — all platforms must pass
+  # =========================================================================
+  all-pass:
+    name: "All CI checks passed"
+    needs: [linux, macos, freebsd]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "linux:   ${{ needs.linux.result }}"
+          echo "macos:   ${{ needs.macos.result }}"
+          echo "freebsd: ${{ needs.freebsd.result }}"
+          if [[ "${{ needs.linux.result }}"   != "success" ]] || \
+             [[ "${{ needs.macos.result }}"   != "success" ]] || \
+             [[ "${{ needs.freebsd.result }}" != "success" ]]; then
+            echo "One or more jobs failed."
+            exit 1
+          fi
+          echo "All jobs succeeded."
