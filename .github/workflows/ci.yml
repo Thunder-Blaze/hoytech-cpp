@@ -1,0 +1,260 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Cancel in-progress runs for the same ref so redundant builds don't pile up
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Shared build / test step used by both Linux and macOS jobs
+# ---------------------------------------------------------------------------
+#
+# We put the actual shell commands in a reusable action-like script that each
+# job calls explicitly, because GitHub doesn't have composite actions in the
+# same repo without an action.yml file.  Instead we just repeat the two-step
+# build+test sequence in each job.
+#
+# ---------------------------------------------------------------------------
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Linux — inotify backend
+  #    Matrix: {GCC latest, Clang latest} × {Release, Debug}
+  # ─────────────────────────────────────────────────────────────────────────
+  linux:
+    name: "Linux / ${{ matrix.compiler }} / ${{ matrix.build }}"
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build: release
+            extra_cxxflags: ""
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            build: release
+            extra_cxxflags: ""
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+
+    env:
+      CC:  ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            make
+
+      - name: Build test suite
+        working-directory: ex
+        run: |
+          make clean
+          make file_change_monitor_test \
+               hex_test \
+               stream_test \
+               XCXXFLAGS="${{ matrix.extra_cxxflags }}"
+
+      - name: Run tests
+        working-directory: ex
+        # inotify requires /tmp to be a normal filesystem (always true on
+        # GitHub-hosted runners, but let's make it explicit)
+        run: |
+          echo "=== Platform info ==="
+          uname -a
+          ls -la /proc/sys/fs/inotify/ 2>/dev/null || true
+          echo ""
+          echo "=== Running hex_test ==="
+          ./hex_test
+          echo ""
+          echo "=== Running stream_test ==="
+          ./stream_test
+          echo ""
+          echo "=== Running file_change_monitor_test (inotify backend) ==="
+          ./file_change_monitor_test
+        timeout-minutes: 5
+
+      # Upload the binary as an artifact on failure for post-mortem debugging
+      - name: Upload binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "linux-${{ matrix.compiler }}-${{ matrix.build }}-binary"
+          path: ex/file_change_monitor_test
+          retention-days: 3
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. macOS — kqueue backend
+  #    Matrix: {AppleClang, Clang from Homebrew} × {Release, Debug}
+  # ─────────────────────────────────────────────────────────────────────────
+  macos:
+    name: "macOS / ${{ matrix.compiler }} / ${{ matrix.build }}"
+    runs-on: macos-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: apple-clang
+            cc: clang
+            cxx: clang++
+            build: release
+            extra_cxxflags: ""
+          - compiler: apple-clang
+            cc: clang
+            cxx: clang++
+            build: debug
+            extra_cxxflags: "-O0 -DDEBUG"
+          # Homebrew LLVM (latest upstream Clang)
+          - compiler: llvm
+            cc: "$(brew --prefix llvm)/bin/clang"
+            cxx: "$(brew --prefix llvm)/bin/clang++"
+            build: release
+            extra_cxxflags: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew LLVM
+        if: matrix.compiler == 'llvm'
+        run: |
+          brew install llvm
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+
+      - name: Set compiler env (Homebrew LLVM)
+        if: matrix.compiler == 'llvm'
+        run: |
+          echo "CC=${{ env.LLVM_PREFIX }}/bin/clang"   >> "$GITHUB_ENV"
+          echo "CXX=${{ env.LLVM_PREFIX }}/bin/clang++" >> "$GITHUB_ENV"
+
+      - name: Set compiler env (Apple Clang)
+        if: matrix.compiler == 'apple-clang'
+        run: |
+          echo "CC=clang"   >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+
+      - name: Build test suite
+        working-directory: ex
+        run: |
+          make clean
+          make file_change_monitor_test \
+               hex_test \
+               stream_test \
+               XCXXFLAGS="${{ matrix.extra_cxxflags }}"
+
+      - name: Run tests
+        working-directory: ex
+        run: |
+          echo "=== Platform info ==="
+          uname -a
+          sw_vers
+          echo ""
+          echo "=== Running hex_test ==="
+          ./hex_test
+          echo ""
+          echo "=== Running stream_test ==="
+          ./stream_test
+          echo ""
+          echo "=== Running file_change_monitor_test (kqueue backend) ==="
+          ./file_change_monitor_test
+        timeout-minutes: 5
+
+      - name: Upload binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "macos-${{ matrix.compiler }}-${{ matrix.build }}-binary"
+          path: ex/file_change_monitor_test
+          retention-days: 3
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. FreeBSD — kqueue backend (vmactions/freebsd-vm)
+  #    Runs on ubuntu-latest host; FreeBSD guest via QEMU.
+  # ─────────────────────────────────────────────────────────────────────────
+  freebsd:
+    name: "FreeBSD 14 / clang / release"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and test inside FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          # Packages to install inside the VM
+          prepare: |
+            pkg install -y gmake llvm
+          run: |
+            set -e
+            echo "=== Platform info ==="
+            uname -a
+            echo ""
+            cd ex
+            gmake clean
+            gmake file_change_monitor_test \
+                  hex_test \
+                  stream_test \
+                  CXX=clang++
+            echo ""
+            echo "=== Running hex_test ==="
+            ./hex_test
+            echo ""
+            echo "=== Running stream_test ==="
+            ./stream_test
+            echo ""
+            echo "=== Running file_change_monitor_test (kqueue backend) ==="
+            ./file_change_monitor_test
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 4. Summary job — required status check that gates PRs
+  # ─────────────────────────────────────────────────────────────────────────
+  all-pass:
+    name: "All CI checks passed"
+    needs: [linux, macos, freebsd]
+    runs-on: ubuntu-latest
+    # Run even if some jobs were skipped (e.g. draft PR)
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "linux:   ${{ needs.linux.result }}"
+          echo "macos:   ${{ needs.macos.result }}"
+          echo "freebsd: ${{ needs.freebsd.result }}"
+          if [[ "${{ needs.linux.result }}"   != "success" ]] || \
+             [[ "${{ needs.macos.result }}"   != "success" ]] || \
+             [[ "${{ needs.freebsd.result }}" != "success" ]]; then
+            echo "One or more jobs failed."
+            exit 1
+          fi
+          echo "All jobs succeeded."
