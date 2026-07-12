@@ -3,8 +3,11 @@
 #include <string>
 #include <chrono>
 #include <filesystem>
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include <stdint.h>
+#include <thread>
 
 #include "hoytech/detail/watch_result.h"
 
@@ -44,11 +47,15 @@ class polling_watcher {
             sleep_ms = timeout_ms;
         }
 
+#ifndef _WIN32
         // Use poll() on the shutdown pipe so we wake instantly on shutdown
         struct pollfd pfd = { shutdown_read_fd, POLLIN, 0 };
         int rv = ::poll(&pfd, 1, sleep_ms);
 
         if (rv > 0 && (pfd.revents & POLLIN)) return watch_result::shutdown;
+#else
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+#endif
 
         // Check filesystem for changes
         std::filesystem::file_time_type current_write_time = std::filesystem::file_time_type::min();
