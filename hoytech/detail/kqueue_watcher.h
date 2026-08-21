@@ -25,7 +25,16 @@ class kqueue_watcher {
     int watch_fd = -1;
     int max_rewatch_attempts = 10;
     uint64_t rewatch_backoff_us = 5'000;
+    time_t last_mtime = 0;
+    off_t last_size = 0;
 
+    void update_mtime() {
+        struct stat st;
+        if (::stat(watched_path.c_str(), &st) == 0) {
+            last_mtime = st.st_mtime;
+            last_size = st.st_size;
+        }
+    }
     void open_and_register() {
         watch_fd = ::open(watched_path.c_str(), O_RDONLY
 #ifdef O_CLOEXEC
@@ -67,6 +76,7 @@ class kqueue_watcher {
             throw hoytech::error("unable to register shutdown pipe on kqueue: ", ::strerror(errno));
 
         open_and_register();
+        update_mtime();
     }
 
     ~kqueue_watcher() {
@@ -96,6 +106,23 @@ class kqueue_watcher {
 
         if (out.fflags & (NOTE_DELETE | NOTE_RENAME)) return watch_result::rewatch_needed;
 
+        if (out.fflags & NOTE_WRITE) {
+            update_mtime();
+            return watch_result::changed;
+        }
+
+        if (out.fflags & NOTE_ATTRIB) {
+            struct stat st;
+            if (::stat(watched_path.c_str(), &st) == 0) {
+                if (st.st_mtime == last_mtime && st.st_size == last_size) {
+                    // Ignore pure atime/permission updates without mtime or size change
+                    return watch_result::timeout;
+                }
+                last_mtime = st.st_mtime;
+                last_size = st.st_size;
+            }
+        }
+
         return watch_result::changed;
     }
 
@@ -108,6 +135,7 @@ class kqueue_watcher {
         for (int attempt = 0; attempt < max_rewatch_attempts; attempt++) {
             try {
                 open_and_register();
+                update_mtime();
                 return;
             } catch (...) {
                 struct pollfd pfd = { shutdown_read_fd, POLLIN, 0 };
