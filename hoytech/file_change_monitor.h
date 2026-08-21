@@ -64,7 +64,6 @@ class file_change_monitor {
             inode_valid = false;
         }
     }
-
     bool has_inode_changed() {
         struct stat st;
         if (::stat(watched_path.c_str(), &st) != 0) {
@@ -77,7 +76,6 @@ class file_change_monitor {
         }
         return st.st_dev != stored_dev || st.st_ino != stored_ino;
     }
-
     void close_pipe() {
         if (shutdown_pipe[0] != -1) { ::close(shutdown_pipe[0]); shutdown_pipe[0] = -1; }
         if (shutdown_pipe[1] != -1) { ::close(shutdown_pipe[1]); shutdown_pipe[1] = -1; }
@@ -193,6 +191,7 @@ class file_change_monitor {
                         [[fallthrough]];
 
                     case detail::watch_result::changed:
+                        update_stored_inode();
                         if (trigger_time == 0) trigger_time = hoytech::curr_time_us() + debounce_us;
                         break;
 
