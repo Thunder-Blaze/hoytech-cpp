@@ -37,8 +37,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <thread>
+#ifndef _WIN32
 #include <unistd.h>
 #include <utime.h>
+#else
+#include <io.h>
+#include <sys/utime.h>
+#define unlink _unlink
+#define chmod _chmod
+#define utime _utime
+#define utimbuf _utimbuf
+#endif
 #include <vector>
 
 #include "hoytech/file_change_monitor.h"
@@ -177,7 +186,14 @@ static const int INODE_TIMEOUT_MS = INODE_CHECK_MS + CALLBACK_TIMEOUT_MS;
 
 // Shared tmp path helper
 static std::string tmp_path(const char *test_name) {
+#ifndef _WIN32
     return std::string("/tmp/hoytech_fcm_test_") + test_name + ".txt";
+#else
+    std::error_code ec;
+    auto p = std::filesystem::temp_directory_path(ec);
+    if (ec) p = ".";
+    return (p / ("hoytech_fcm_test_" + std::string(test_name) + ".txt")).string();
+#endif
 }
 
 // 1. Basic write detection
@@ -602,7 +618,13 @@ REGISTER_XFAIL_TEST(symlink_target_change) {
     FileGuard g2(link.c_str());
 
     write_file(target.c_str(), "original target\n");
+#ifndef _WIN32
     ASSERT(symlink(target.c_str(), link.c_str()) == 0);
+#else
+    std::error_code ec;
+    std::filesystem::create_symlink(target, link, ec);
+    ASSERT(!ec);
+#endif
 
     std::atomic<int> count{0};
     hoytech::file_change_monitor mon(link);
@@ -646,7 +668,13 @@ REGISTER_XFAIL_TEST(hardlink_modification) {
     FileGuard g2(linkpath.c_str());
 
     write_file(path.c_str(), "original\n");
+#ifndef _WIN32
     ASSERT(link(path.c_str(), linkpath.c_str()) == 0);
+#else
+    std::error_code ec;
+    std::filesystem::create_hard_link(path, linkpath, ec);
+    ASSERT(!ec);
+#endif
 
     std::atomic<int> count{0};
     hoytech::file_change_monitor mon(path);

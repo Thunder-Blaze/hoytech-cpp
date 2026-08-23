@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <cinttypes>
 
 #include "hoytech/error.h"
 
@@ -33,7 +34,7 @@ inline std::string to_hex(std::string_view input, bool prefixed = false) {
 inline std::string to_hex(uint64_t input, bool prefixed = false) {
     char buf[32];
 
-    snprintf(buf, sizeof(buf), "%s%lx", prefixed ? "0x" : "", input);
+    snprintf(buf, sizeof(buf), "%s%" PRIx64, prefixed ? "0x" : "", input);
 
     return std::string(buf);
 }
