@@ -20,7 +20,7 @@ namespace detail {
 class kqueue_watcher {
   private:
     std::string watched_path;
-    int shutdown_read_fd = -1;
+    int shutdown_pipe[2] = {-1, -1};
     int kq_fd = -1;
     int watch_fd = -1;
     int max_rewatch_attempts = 10;
@@ -61,9 +61,12 @@ class kqueue_watcher {
   public:
     kqueue_watcher() = default;
 
-    void init(const std::string &path, int shutdown_fd) {
+    void init(const std::string &path) {
         watched_path = path;
-        shutdown_read_fd = shutdown_fd;
+        if (::pipe(shutdown_pipe) < 0) throw hoytech::error("unable to create shutdown pipe: ", ::strerror(errno));
+        ::fcntl(shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
+        ::fcntl(shutdown_pipe[1], F_SETFD, FD_CLOEXEC);
+
 
         kq_fd = ::kqueue();
         if (kq_fd < 0) throw hoytech::error("unable to create kqueue: ", ::strerror(errno));
@@ -71,7 +74,7 @@ class kqueue_watcher {
 
         // Register the shutdown pipe on the kqueue for unified event waiting
         struct kevent pipeEv;
-        EV_SET(&pipeEv, shutdown_read_fd, EVFILT_READ, EV_ADD, 0, 0, nullptr);
+        EV_SET(&pipeEv, shutdown_pipe[0], EVFILT_READ, EV_ADD, 0, 0, nullptr);
         if (::kevent(kq_fd, &pipeEv, 1, nullptr, 0, nullptr) < 0)
             throw hoytech::error("unable to register shutdown pipe on kqueue: ", ::strerror(errno));
 
@@ -80,8 +83,18 @@ class kqueue_watcher {
     }
 
     ~kqueue_watcher() {
+        if (shutdown_pipe[0] != -1) { ::close(shutdown_pipe[0]); shutdown_pipe[0] = -1; }
+        if (shutdown_pipe[1] != -1) { ::close(shutdown_pipe[1]); shutdown_pipe[1] = -1; }
         if (watch_fd != -1) { ::close(watch_fd); watch_fd = -1; }
         if (kq_fd != -1)    { ::close(kq_fd);    kq_fd = -1;    }
+    }
+
+    void shutdown() {
+        if (shutdown_pipe[1] != -1) {
+            char byte = 1;
+            int rv = ::write(shutdown_pipe[1], &byte, 1);
+            (void)rv;
+        }
     }
 
     watch_result wait_for_event(int timeout_ms) {
@@ -102,7 +115,7 @@ class kqueue_watcher {
         if (rv == 0)                    return watch_result::timeout;
         if (out.flags & EV_ERROR)       return watch_result::shutdown;
 
-        if (static_cast<int>(out.ident) == shutdown_read_fd) return watch_result::shutdown;
+        if (static_cast<int>(out.ident) == shutdown_pipe[0]) return watch_result::shutdown;
 
         if (out.fflags & (NOTE_DELETE | NOTE_RENAME)) return watch_result::rewatch_needed;
 
@@ -138,7 +151,7 @@ class kqueue_watcher {
                 update_mtime();
                 return;
             } catch (...) {
-                struct pollfd pfd = { shutdown_read_fd, POLLIN, 0 };
+                struct pollfd pfd = { shutdown_pipe[0], POLLIN, 0 };
                 int timeout_ms = static_cast<int>((rewatch_backoff_us * (attempt + 1)) / 1000);
                 if (timeout_ms == 0) timeout_ms = 1;
                 int rv = ::poll(&pfd, 1, timeout_ms);

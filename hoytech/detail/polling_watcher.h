@@ -3,11 +3,10 @@
 #include <string>
 #include <chrono>
 #include <filesystem>
-#ifndef _WIN32
-#include <poll.h>
-#endif
 #include <stdint.h>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "hoytech/detail/watch_result.h"
 
@@ -19,17 +18,18 @@ namespace detail {
 class polling_watcher {
   private:
     std::string watched_path;
-    int shutdown_read_fd = -1;
+    std::mutex shutdown_mutex;
+    std::condition_variable shutdown_cv;
+    bool is_shutdown = false;
     uint64_t poll_interval_ms = 100;
     std::filesystem::file_time_type last_write_time = std::filesystem::file_time_type::min();
 
   public:
     polling_watcher() = default;
 
-    void init(const std::string &path, int shutdown_fd) {
+    void init(const std::string &path) {
         watched_path = path;
-        shutdown_read_fd = shutdown_fd;
-
+        is_shutdown = false;
         try {
             last_write_time = std::filesystem::last_write_time(watched_path);
         } catch (...) {
@@ -37,7 +37,13 @@ class polling_watcher {
         }
     }
 
-    ~polling_watcher() = default;
+    ~polling_watcher() { shutdown(); }
+
+    void shutdown() {
+        std::lock_guard<std::mutex> lock(shutdown_mutex);
+        is_shutdown = true;
+        shutdown_cv.notify_all();
+    }
 
     watch_result wait_for_event(int timeout_ms) {
         // Determine how long to sleep: the minimum of the requested timeout
@@ -47,15 +53,12 @@ class polling_watcher {
             sleep_ms = timeout_ms;
         }
 
-#ifndef _WIN32
-        // Use poll() on the shutdown pipe so we wake instantly on shutdown
-        struct pollfd pfd = { shutdown_read_fd, POLLIN, 0 };
-        int rv = ::poll(&pfd, 1, sleep_ms);
-
-        if (rv > 0 && (pfd.revents & POLLIN)) return watch_result::shutdown;
-#else
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-#endif
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex);
+            if (shutdown_cv.wait_for(lock, std::chrono::milliseconds(sleep_ms), [this] { return is_shutdown; })) {
+                return watch_result::shutdown;
+            }
+        }
 
         // Check filesystem for changes
         std::filesystem::file_time_type current_write_time = std::filesystem::file_time_type::min();

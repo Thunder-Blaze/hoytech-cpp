@@ -28,6 +28,10 @@
 #  include "hoytech/detail/kqueue_watcher.h"
    namespace hoytech { namespace detail { using platform_watcher = kqueue_watcher; } }
 
+#elif defined(_WIN32)
+#  include "hoytech/detail/windows_watcher.h"
+   namespace hoytech { namespace detail { using platform_watcher = windows_watcher; } }
+
 #else
 #  include "hoytech/detail/polling_watcher.h"
    namespace hoytech { namespace detail { using platform_watcher = polling_watcher; } }
@@ -43,7 +47,6 @@ class file_change_monitor {
   private:
     std::string watched_path;
     uint64_t debounce_us = 50'000;
-    int shutdown_pipe[2] = {-1, -1};
     std::atomic<bool> shutdown{false};
     std::thread t;
     detail::platform_watcher watcher;
@@ -76,23 +79,10 @@ class file_change_monitor {
         }
         return st.st_dev != stored_dev || st.st_ino != stored_ino;
     }
-    void close_pipe() {
-#ifndef _WIN32
-        if (shutdown_pipe[0] != -1) { ::close(shutdown_pipe[0]); shutdown_pipe[0] = -1; }
-        if (shutdown_pipe[1] != -1) { ::close(shutdown_pipe[1]); shutdown_pipe[1] = -1; }
-#endif
-    }
 
   public:
     explicit file_change_monitor(std::string path) : watched_path(std::move(path)) {
-#ifndef _WIN32
-        if (::pipe(shutdown_pipe) < 0)
-            throw hoytech::error("unable to create shutdown pipe: ", ::strerror(errno));
-        ::fcntl(shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
-        ::fcntl(shutdown_pipe[1], F_SETFD, FD_CLOEXEC);
-#endif
-
-        watcher.init(watched_path, shutdown_pipe[0]);
+        watcher.init(watched_path);
         update_stored_inode();
     }
 
@@ -210,18 +200,11 @@ class file_change_monitor {
         shutdown = true;
 
         if (t.joinable()) {
-#ifndef _WIN32
-            char byte = 1;
-            int rv = ::write(shutdown_pipe[1], &byte, 1);
-            (void)rv;
-#endif
+            watcher.shutdown();
 
             t.join();
         }
-
-        close_pipe();
     }
-
     file_change_monitor(const file_change_monitor &) = delete;
     file_change_monitor &operator=(const file_change_monitor &) = delete;
 };

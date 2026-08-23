@@ -19,7 +19,7 @@ namespace detail {
 class inotify_watcher {
   private:
     std::string watched_path;
-    int shutdown_read_fd = -1;
+    int shutdown_pipe[2] = {-1, -1};
     int inotify_fd = -1;
     int inotify_wd = -1;
     int max_rewatch_attempts = 10;
@@ -34,9 +34,12 @@ class inotify_watcher {
   public:
     inotify_watcher() = default;
 
-    void init(const std::string &path, int shutdown_fd) {
+    void init(const std::string &path) {
         watched_path = path;
-        shutdown_read_fd = shutdown_fd;
+        if (::pipe(shutdown_pipe) < 0) throw hoytech::error("unable to create shutdown pipe: ", ::strerror(errno));
+        ::fcntl(shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
+        ::fcntl(shutdown_pipe[1], F_SETFD, FD_CLOEXEC);
+
 
         inotify_fd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
         if (inotify_fd < 0) throw hoytech::error("unable to create inotify descriptor: ", ::strerror(errno));
@@ -45,6 +48,8 @@ class inotify_watcher {
     }
 
     ~inotify_watcher() {
+        if (shutdown_pipe[0] != -1) { ::close(shutdown_pipe[0]); shutdown_pipe[0] = -1; }
+        if (shutdown_pipe[1] != -1) { ::close(shutdown_pipe[1]); shutdown_pipe[1] = -1; }
         if (inotify_wd != -1 && inotify_fd != -1) {
             ::inotify_rm_watch(inotify_fd, inotify_wd);
             inotify_wd = -1;
@@ -55,10 +60,18 @@ class inotify_watcher {
         }
     }
 
+    void shutdown() {
+        if (shutdown_pipe[1] != -1) {
+            char byte = 1;
+            int rv = ::write(shutdown_pipe[1], &byte, 1);
+            (void)rv;
+        }
+    }
+
     watch_result wait_for_event(int timeout_ms) {
         struct pollfd pfd[2] = {
             { inotify_fd, POLLIN, 0 },
-            { shutdown_read_fd, POLLIN, 0 }
+            { shutdown_pipe[0], POLLIN, 0 }
         };
 
         int rv = ::poll(pfd, 2, timeout_ms);
@@ -110,7 +123,7 @@ class inotify_watcher {
                 add_watch();
                 return;
             } catch (...) {
-                struct pollfd pfd = { shutdown_read_fd, POLLIN, 0 };
+                struct pollfd pfd = { shutdown_pipe[0], POLLIN, 0 };
                 int timeout_ms = static_cast<int>((rewatch_backoff_us * (attempt + 1)) / 1000);
                 if (timeout_ms == 0) timeout_ms = 1;
                 int rv = ::poll(&pfd, 1, timeout_ms);
