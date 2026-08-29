@@ -43,10 +43,24 @@
 #else
 #include <io.h>
 #include <sys/utime.h>
+#if defined(_MSC_VER)
+using ssize_t = ptrdiff_t;
+using mode_t = unsigned short;
+#endif
 #define unlink _unlink
 #define chmod _chmod
 #define utime _utime
 #define utimbuf _utimbuf
+#define open _open
+#define read _read
+#define write _write
+#define close _close
+#ifndef O_WRONLY
+#define O_WRONLY _O_WRONLY
+#define O_CREAT _O_CREAT
+#define O_TRUNC _O_TRUNC
+#define O_APPEND _O_APPEND
+#endif
 #endif
 #include <vector>
 
@@ -74,10 +88,7 @@ static int g_tests_failed = 0;
 
 /** Sleep for ms milliseconds. */
 static void sleep_ms(int ms) {
-    struct timespec ts;
-    ts.tv_sec  = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1'000'000L;
-    nanosleep(&ts, nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 /** Write content to a file (create/truncate). Returns true on success. */
@@ -591,7 +602,7 @@ REGISTER_TEST(large_write_detection) {
     big.back() = '\n';
     int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     ASSERT(fd >= 0);
-    ssize_t rv = ::write(fd, big.data(), big.size());
+    ssize_t rv = write(fd, big.data(), big.size());
     close(fd);
     ASSERT(rv == static_cast<ssize_t>(big.size()));
 
