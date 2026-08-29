@@ -205,19 +205,9 @@ jobs:
     name: "Windows / MSVC"
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          install: make
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -225,8 +215,17 @@ jobs:
       - name: Build and test
         working-directory: ex
         run: |
-          make clean
-          make test CXX=cl
+          cl /std:c++17 /EHsc /W4 /I.. hex_test.cpp
+          .\hex_test.exe
+
+          cl /std:c++17 /EHsc /W4 /I.. zerocopy_test.cpp
+          .\zerocopy_test.exe
+
+          cl /std:c++17 /EHsc /W4 /I.. timer_test.cpp
+          .\timer_test.exe
+
+          cl /std:c++17 /EHsc /W4 /I.. file_change_monitor_test.cpp ws2_32.lib
+          .\file_change_monitor_test.exe
         timeout-minutes: 5
 
   all-pass:
