@@ -2,8 +2,14 @@ W        = -Wall -Wextra
 OPT      = -O2 -g
 STD      = -std=c++17
 INC      = -I..
+ifeq ($(OS),Windows_NT)
+    WS_LIBS = -lws2_32
+else
+    WS_LIBS =
+endif
+
 CXXFLAGS = $(STD) $(OPT) $(W) $(INC) -fPIC $(XCXXFLAGS)
-LDFLAGS  = -lpthread $(XLDFLAGS)
+LDFLAGS  = -lpthread $(WS_LIBS) $(XLDFLAGS)
 
 # Binaries built by default
 TEST_BINS = hex_test stream_test zerocopy_test file_change_monitor_test
