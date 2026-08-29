@@ -4,15 +4,15 @@ STD      = -std=c++17
 INC      = -I..
 ifeq ($(OS),Windows_NT)
     WS_LIBS = -lws2_32
+    TEST_BINS = hex_test zerocopy_test file_change_monitor_test
 else
     WS_LIBS =
+    TEST_BINS = hex_test stream_test zerocopy_test file_change_monitor_test
 endif
 
 CXXFLAGS = $(STD) $(OPT) $(W) $(INC) -fPIC $(XCXXFLAGS)
 LDFLAGS  = -lpthread $(WS_LIBS) $(XLDFLAGS)
 
-# Binaries built by default
-TEST_BINS = hex_test stream_test zerocopy_test file_change_monitor_test
 
 all: $(TEST_BINS) timer_test
 
@@ -51,8 +51,10 @@ test: $(TEST_BINS)
 	./hex_test
 	@echo "=== Running zerocopy_test ==="
 	./zerocopy_test
+ifneq ($(OS),Windows_NT)
 	@echo "=== Running stream_test ==="
 	./stream_test
+endif
 	@echo "=== Running file_change_monitor_test ==="
 	./file_change_monitor_test
 	@echo ""
