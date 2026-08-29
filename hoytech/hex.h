@@ -60,7 +60,7 @@ inline std::string from_hex(std::string_view input, bool allowUnevenSize = true)
     };
 
     for(size_t i=0; i<input.length(); i+=2) {
-        output[i/2] = (decode(input[i]) << 4) | decode(input[i+1]);
+        output[i/2] = static_cast<char>((decode(input[i]) << 4) | decode(input[i+1]));
     }
 
     return output;
