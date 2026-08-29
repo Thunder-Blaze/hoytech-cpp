@@ -1,4 +1,5 @@
-#include <unistd.h>
+#include <thread>
+#include <chrono>
 
 #include <iostream>
 
@@ -38,7 +39,7 @@ int main() {
         return curr * 1'000'000;
     });
 
-    sleep(16);
+    std::this_thread::sleep_for(std::chrono::seconds(16));
 
     std::cout << "All done, let's destroy the timer" << std::endl;
 

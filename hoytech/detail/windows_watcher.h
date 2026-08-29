@@ -24,7 +24,7 @@ private:
 
     std::filesystem::path directory;
     std::string filename;
-
+    std::wstring target_filename_w;
     int max_rewatch_attempts = 10;
     uint64_t rewatch_backoff_us = 5'000;
 
@@ -75,11 +75,11 @@ private:
     }
 
     bool matches_target(const FILE_NOTIFY_INFORMATION* info) {
-        std::wstring changed(
+        std::wstring_view changed(
             info->FileName,
             info->FileNameLength / sizeof(WCHAR)
         );
-        return changed == std::filesystem::path(filename).wstring();
+        return changed == target_filename_w;
     }
 
 public:
@@ -91,7 +91,7 @@ public:
         std::filesystem::path p(path);
         directory = p.parent_path();
         filename = p.filename().string();
-
+        target_filename_w = p.filename().wstring();
         if (directory.empty()) {
             directory = ".";
         }
@@ -109,12 +109,24 @@ public:
         overlapped = {};
         overlapped.hEvent = change_event;
 
-        open_and_register();
+        try {
+            open_and_register();
+        } catch (...) {
+            CloseHandle(change_event);
+            change_event = NULL;
+            CloseHandle(shutdown_event);
+            shutdown_event = NULL;
+            throw;
+        }
     }
 
     ~windows_watcher() {
         shutdown();
-        if (directory_handle != INVALID_HANDLE_VALUE) { CloseHandle(directory_handle); directory_handle = INVALID_HANDLE_VALUE; }
+        if (directory_handle != INVALID_HANDLE_VALUE) {
+            CancelIoEx(directory_handle, &overlapped);
+            CloseHandle(directory_handle);
+            directory_handle = INVALID_HANDLE_VALUE;
+        }
         if (shutdown_event) { CloseHandle(shutdown_event); shutdown_event = NULL; }
         if (change_event) { CloseHandle(change_event); change_event = NULL; }
     }
