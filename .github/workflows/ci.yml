@@ -240,13 +240,13 @@ jobs:
           echo "linux:         ${{ needs.linux.result }}"
           echo "macos:         ${{ needs.macos.result }}"
           echo "freebsd:       ${{ needs.freebsd.result }}"
-          echo "windows-mingw: ${{ needs.'windows-mingw'.result }}"
-          echo "windows-msvc:  ${{ needs.'windows-msvc'.result }}"
+          echo "windows-mingw: ${{ needs['windows-mingw'].result }}"
+          echo "windows-msvc:  ${{ needs['windows-msvc'].result }}"
           if [[ "${{ needs.linux.result }}"           != "success" ]] || \
              [[ "${{ needs.macos.result }}"           != "success" ]] || \
              [[ "${{ needs.freebsd.result }}"         != "success" ]] || \
-             [[ "${{ needs.'windows-mingw'.result }}" != "success" ]] || \
-             [[ "${{ needs.'windows-msvc'.result }}"  != "success" ]]; then
+             [[ "${{ needs['windows-mingw'].result }}" != "success" ]] || \
+             [[ "${{ needs['windows-msvc'].result }}"  != "success" ]]; then
             echo "One or more jobs failed."
             exit 1
           fi
