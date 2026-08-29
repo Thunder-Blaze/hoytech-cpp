@@ -104,7 +104,11 @@ static bool append_file(const char *path, const char *content) {
 static bool atomic_replace(const char *dst_path, const char *content) {
     std::string tmp = std::string(dst_path) + ".tmp";
     if (!write_file(tmp.c_str(), content)) return false;
+#ifdef _WIN32
+    return MoveFileExA(tmp.c_str(), dst_path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
     return rename(tmp.c_str(), dst_path) == 0;
+#endif
 }
 
 /** Remove a file, ignoring errors if already absent. */
